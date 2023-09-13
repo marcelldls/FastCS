@@ -21,6 +21,7 @@ class TangoDSROptions:
     dev_name: str = "MY/DEVICE/NAME"
     dev_class: str = "FAST_CS_DEVICE"
     dsr_instance: str = "MY_SERVER_INSTANCE"
+    debug: bool = False
 
 
 def _get_dtype_args(datatype: DataType) -> dict:
@@ -35,17 +36,19 @@ def _get_dtype_args(datatype: DataType) -> dict:
             raise FastCSException(f"Unsupported type {type(datatype)}: {datatype}")
 
 
-def _pick_updater_fget(attribute, controller):
+def _pick_updater_fget(attr_name, attribute, controller):
     async def fget(self):
         await attribute.updater.update(controller, attribute)
+        self.info_stream(f"called fget method: {attr_name}")
         return attribute.get()
 
     return fget
 
 
-def _pick_updater_fset(attribute, controller):
+def _pick_updater_fset(attr_name, attribute, controller):
     async def fset(self, val):
         await attribute.updater.put(controller, attribute, val)
+        self.info_stream(f"called fset method: {attr_name}")
 
     return fset
 
@@ -60,21 +63,22 @@ def _collect_dev_attributes(mapping: Mapping) -> dict:
             instance.update(_get_dtype_args(attribute.datatype))
 
             polling_period = int(attribute.updater.update_period * 1e3)  # ms
+            f_args = (attr_name, attribute, s_map.controller)
 
             match attribute:
                 case AttrRW():
-                    instance["fget"] = _pick_updater_fget(attribute, s_map.controller)
-                    instance["fset"] = _pick_updater_fset(attribute, s_map.controller)
+                    instance["fget"] = _pick_updater_fget(*f_args)
+                    instance["fset"] = _pick_updater_fset(*f_args)
                     instance["access"] = AttrWriteType.READ_WRITE
                     instance["polling_period"] = polling_period
                 case AttrR():
                     # instance["fget"] = lambda *args: 1  # Read one/True
-                    instance["fget"] = _pick_updater_fget(attribute, s_map.controller)
+                    instance["fget"] = _pick_updater_fget(*f_args)
                     instance["access"] = AttrWriteType.READ
                     instance["polling_period"] = polling_period
                 case AttrW():
                     # instance["fset"] = lambda *args: None  # Do nothing
-                    instance["fset"] = _pick_updater_fset(attribute, s_map.controller)
+                    instance["fset"] = _pick_updater_fset(*f_args)
                     instance["access"] = AttrWriteType.WRITE
                     instance["polling_period"] = polling_period
 
@@ -85,9 +89,10 @@ def _collect_dev_attributes(mapping: Mapping) -> dict:
     return collection
 
 
-def _pick_command_f(method_name, method):
+def _pick_command_f(method_name, method, controller):
     async def _dynamic_f(self):
-        return await method()
+        self.info_stream(f"called {controller} f method: {method_name}")
+        return await MethodType(method, controller)()
 
     _dynamic_f.__name__ = method_name
     return _dynamic_f
@@ -102,9 +107,8 @@ def _collect_dev_commands(mapping: Mapping) -> dict:
             instance = {}
             cmd_name = name.title().replace("_", "")
             dev_cmd_name = path.upper() + "_" + cmd_name if path else cmd_name
-            instance["f"] = _pick_command_f(
-                dev_cmd_name, MethodType(method.fn, s_map.controller)
-            )
+            f_args = (dev_cmd_name, method.fn, s_map.controller)
+            instance["f"] = _pick_command_f(*f_args)
             # instance["dtype_out"] = str  # Read return string for debug
             collection[dev_cmd_name] = server.command(**instance)
 
@@ -126,6 +130,15 @@ def _collect_dev_helpers(mapping: Mapping) -> dict:
     collection["green_mode"] = GreenMode.Asyncio
 
     return collection
+
+
+def _collect_dsr_args(debug):
+    args = []
+
+    if debug:
+        args.append("-v4")
+
+    return args
 
 
 class TangoDSR:
@@ -160,7 +173,12 @@ class TangoDSR:
         pytango_class = type(options.dev_class, (server.Device,), class_body)
         register_dev(options.dev_name, options.dev_class, options.dsr_instance)
 
-        server.run((pytango_class,), [options.dev_class, options.dsr_instance])
+        dsr_args = _collect_dsr_args(options.debug)
+
+        server.run(
+            (pytango_class,),
+            [options.dev_class, options.dsr_instance, *dsr_args],
+            )
 
 
 def register_dev(dev_name, dev_class, dsr_instance):
