@@ -59,7 +59,10 @@ def _collect_dev_attributes(mapping: Mapping) -> dict:
         path = s_map.controller.path
 
         for attr_name, attribute in s_map.attributes.items():
-            instance = {"label": attr_name}
+            attr_name = attr_name.title().replace("_", "")
+            dev_attr_name = path.upper() + "_" + attr_name if path else attr_name
+
+            instance = {"label": dev_attr_name}
             instance.update(_get_dtype_args(attribute.datatype))
 
             polling_period = int(attribute.updater.update_period * 1e3)  # ms
@@ -82,8 +85,6 @@ def _collect_dev_attributes(mapping: Mapping) -> dict:
                     instance["access"] = AttrWriteType.WRITE
                     instance["polling_period"] = polling_period
 
-            attr_name = attr_name.title().replace("_", "")
-            dev_attr_name = path.upper() + "_" + attr_name if path else attr_name
             collection[dev_attr_name] = server.attribute(**instance)
 
     return collection
