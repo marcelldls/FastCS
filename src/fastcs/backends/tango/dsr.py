@@ -2,18 +2,16 @@ from dataclasses import dataclass
 from types import MethodType
 from typing import Any, Callable
 
-from tango import server, Database, GreenMode, DevState, AttrWriteType
-from tango import DbDevInfo
-from tango import GreenMode, DevState, AttrWriteType
+from tango import AttrWriteType, Database, DbDevInfo, DevState, GreenMode, server
 
 from fastcs.attributes import AttrR, AttrRW, AttrW
+from fastcs.backend import (
+    _link_attribute_sender_class,
+    _link_single_controller_put_tasks,
+)
 from fastcs.datatypes import Bool, DataType, Float, Int
 from fastcs.exceptions import FastCSException
 from fastcs.mapping import Mapping
-from fastcs.backend import (
-    _link_single_controller_put_tasks,
-    _link_attribute_sender_class,
-)
 
 
 @dataclass
