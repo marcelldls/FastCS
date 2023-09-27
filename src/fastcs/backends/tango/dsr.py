@@ -1,18 +1,17 @@
 from dataclasses import dataclass
 from types import MethodType
-from typing import Any, List, Awaitable, Callable
+from typing import Any, Awaitable, Callable, List
 
 import tango
-from tango import server, AttrWriteType, Database, DbDevInfo, DevState
+from tango import AttrWriteType, Database, DbDevInfo, DevState, server
 
-from fastcs.attributes import AttrR, AttrRW, AttrW
+from fastcs.attributes import Attribute, AttrR, AttrRW, AttrW
 from fastcs.backend import (
     _link_attribute_sender_class,
     _link_single_controller_put_tasks,
 )
 from fastcs.controller import BaseController
-from fastcs.datatypes import Bool, DataType, Float, Int
-from fastcs.exceptions import FastCSException
+from fastcs.datatypes import Float
 from fastcs.mapping import Mapping
 
 
@@ -24,22 +23,9 @@ class TangoDSROptions:
     debug: bool = False
 
 
-def _get_dtype_args(datatype: DataType) -> dict[str, Any]:
-    match datatype:
-        case Bool():
-            return {"dtype": bool}
-        case Int():
-            return {"dtype": int}
-        case Float(prec):
-            return {"dtype": float, "format": f"%.{prec}"}
-        case _:
-            msg = f"Unsupported type {type(datatype)}: {datatype}"
-            raise FastCSException(msg)
-
-
-def _pick_updater_fget(
+def _wrap_updater_fget(
     attr_name: str, attribute: AttrR, controller: BaseController
-) -> Awaitable[Any]:
+) -> Callable[[Any], Any]:
     async def fget(self):
         await attribute.updater.update(controller, attribute)
         self.info_stream(f"called fget method: {attr_name}")
@@ -48,9 +34,25 @@ def _pick_updater_fget(
     return fget
 
 
-def _pick_updater_fset(
+def _tango_polling_period(attribute: AttrR) -> int:
+    if attribute.updater is not None:
+        # Convert to integer milliseconds
+        return int(attribute.updater.update_period * 1000)
+
+    return -1  # `tango.server.attribute` default for `polling_period`
+
+
+def _tango_display_format(attribute: Attribute) -> str:
+    match attribute.datatype:
+        case Float(prec):
+            return f"%.{prec}"
+
+    return "6.2f"  # `tango.server.attribute` default for `format`
+
+
+def _wrap_updater_fset(
     attr_name: str, attribute: AttrW, controller: BaseController
-) -> Awaitable[None]:
+) -> Callable[[Any, Any], Any]:
     async def fset(self, val):
         await attribute.updater.put(controller, attribute, val)
         self.info_stream(f"called fset method: {attr_name}")
@@ -59,7 +61,7 @@ def _pick_updater_fset(
 
 
 def _collect_dev_attributes(mapping: Mapping) -> dict[str, Any]:
-    collection = {}
+    collection: dict[str, Any] = {}
     for single_mapping in mapping.get_controller_mappings():
         path = single_mapping.controller.path
 
@@ -67,43 +69,47 @@ def _collect_dev_attributes(mapping: Mapping) -> dict[str, Any]:
             attr_name = attr_name.title().replace("_", "")
             d_attr_name = f"{path.upper()}_{attr_name}" if path else attr_name
 
-            instance = {"label": d_attr_name}
-            instance.update(_get_dtype_args(attribute.datatype))
-
             match attribute:
                 case AttrRW():
-                    instance["fget"] = _pick_updater_fget(
-                        attr_name, attribute, single_mapping.controller
+                    collection[d_attr_name] = server.attribute(
+                        label=d_attr_name,
+                        dtype=attribute.datatype.dtype,
+                        fget=_wrap_updater_fget(
+                            attr_name, attribute, single_mapping.controller
+                        ),
+                        fset=_wrap_updater_fset(
+                            attr_name, attribute, single_mapping.controller
+                        ),
+                        access=AttrWriteType.READ_WRITE,
+                        format=_tango_display_format(attribute),
+                        polling_period=_tango_polling_period(attribute),
                     )
-                    instance["fset"] = _pick_updater_fset(
-                        attr_name, attribute, single_mapping.controller
-                    )
-                    instance["access"] = AttrWriteType.READ_WRITE
-                    if attribute.updater is not None:
-                        polling_period = int(attribute.updater.update_period)
-                        instance["polling_period"] = polling_period * 1000
                 case AttrR():
-                    # instance["fget"] = lambda *args: 1  # Read one/True
-                    instance["fget"] = _pick_updater_fget(
-                        attr_name, attribute, single_mapping.controller
+                    collection[d_attr_name] = server.attribute(
+                        label=d_attr_name,
+                        dtype=attribute.datatype.dtype,
+                        access=AttrWriteType.READ,
+                        fget=_wrap_updater_fget(
+                            attr_name, attribute, single_mapping.controller
+                        ),
+                        format=_tango_display_format(attribute),
+                        polling_period=_tango_polling_period(attribute),
                     )
-                    instance["access"] = AttrWriteType.READ
-                    if attribute.updater is not None:
-                        polling_period = int(attribute.updater.update_period)
-                        instance["polling_period"] = polling_period * 1000
                 case AttrW():
-                    # instance["fset"] = lambda *args: None  # Do nothing
-                    instance["fset"] = _pick_updater_fset(
-                        attr_name, attribute, single_mapping.controller
+                    collection[d_attr_name] = server.attribute(
+                        label=d_attr_name,
+                        dtype=attribute.datatype.dtype,
+                        access=AttrWriteType.WRITE,
+                        fset=_wrap_updater_fset(
+                            attr_name, attribute, single_mapping.controller
+                        ),
+                        format=_tango_display_format(attribute),
                     )
-                    instance["access"] = AttrWriteType.WRITE
-
-            collection[d_attr_name] = server.attribute(**instance)
 
     return collection
 
 
-def _pick_command_f(
+def _wrap_command_f(
     method_name: str, method: Callable, controller: BaseController
 ) -> Callable[..., Awaitable[None]]:
     async def _dynamic_f(self) -> None:
@@ -115,20 +121,22 @@ def _pick_command_f(
 
 
 def _collect_dev_commands(mapping: Mapping) -> dict[str, Any]:
-    collection = {}
+    collection: dict[str, Any] = {}
     for single_mapping in mapping.get_controller_mappings():
         path = single_mapping.controller.path
 
         for name, method in single_mapping.command_methods.items():
-            instance = {}
             cmd_name = name.title().replace("_", "")
             d_cmd_name = path.upper() + "_" + cmd_name if path else cmd_name
-            instance["f"] = _pick_command_f(
-                d_cmd_name, method.fn, single_mapping.controller
+            collection[d_cmd_name] = server.command(
+                f=_wrap_command_f(d_cmd_name, method.fn, single_mapping.controller)
             )
-            # instance["dtype_out"] = str  # Read return string for debug
-            collection[d_cmd_name] = server.command(**instance)
 
+    return collection
+
+
+def _collect_dev_properties(mapping: Mapping) -> dict[str, Any]:
+    collection: dict[str, Any] = {}
     return collection
 
 
@@ -141,15 +149,15 @@ def _collect_dev_init(mapping: Mapping) -> dict[str, Callable]:
     return {"init_device": init_device}
 
 
-def _collect_dev_helpers(mapping: Mapping) -> dict[str, Any]:
-    collection = {}
+def _collect_dev_flags(mapping: Mapping) -> dict[str, Any]:
+    collection: dict[str, Any] = {}
 
     collection["green_mode"] = tango.GreenMode.Asyncio
 
     return collection
 
 
-def _collect_dsr_args(options: TangoDSROptions) -> List:
+def _collect_dsr_args(options: TangoDSROptions) -> List[str]:
     args = []
 
     if options.debug:
@@ -173,22 +181,16 @@ class TangoDSR:
 
         self._link_process_tasks()
 
-        dev_attributes = _collect_dev_attributes(self._mapping)
-        dev_commands = _collect_dev_commands(self._mapping)
-        dev_properties: dict = {}
-        dev_init = _collect_dev_init(self._mapping)
-        dev_helpers = _collect_dev_helpers(self._mapping)
-
-        class_body = {
-            **dev_attributes,
-            **dev_commands,
-            **dev_properties,
-            **dev_init,
-            **dev_helpers,
+        class_dict: dict = {
+            **_collect_dev_attributes(self._mapping),
+            **_collect_dev_commands(self._mapping),
+            **_collect_dev_properties(self._mapping),
+            **_collect_dev_init(self._mapping),
+            **_collect_dev_flags(self._mapping),
         }
 
         class_bases = (server.Device,)
-        pytango_class = type(options.dev_class, class_bases, class_body)
+        pytango_class = type(options.dev_class, class_bases, class_dict)
         register_dev(options.dev_name, options.dev_class, options.dsr_instance)
 
         dsr_args = _collect_dsr_args(options)
@@ -207,9 +209,10 @@ def register_dev(dev_name: str, dev_class: str, dsr_instance: str) -> None:
     dev_info.server = dsr_name
 
     db = Database()
-    db.delete_device(dev_name)  # Remove existing device if any
+    db.delete_device(dev_name)  # Remove existing device entry
     db.add_device(dev_info)
 
+    # Validate registration by reading
     read_dev_info = db.get_device_info(dev_info.name)
 
     print("Registered on Tango Database:")
