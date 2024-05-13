@@ -10,12 +10,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 description = "Control system agnostic framework for building Device support in Python that will work for both EPICS and Tango"
-dependencies = [
-    "numpy",
-    "pydantic",
-    "pvi~=0.8.1",
-    "softioc",
-]
+dependencies = ["aioserial", "numpy", "pydantic", "pvi~=0.8.1", "softioc"]
 dynamic = ["version"]
 license.file = "LICENSE"
 readme = "README.md"
